@@ -25,7 +25,7 @@ All files under `lib/` were rewritten from obfuscated (eval + string array + con
 | `cooldown.js` | Cooldown system using `@cacheable/node-cache` |
 | `cryptokey.js` | AES-256-CBC encrypt/decrypt, hash, HMAC |
 | `exif.js` | WebP sticker EXIF metadata |
-| `functions.js` | Utility functions (`getFile`, `parseMention`, `formatSize`, `extractCommand`) |
+| `functions.js` | Utility functions (includes 11 Utils methods) |
 | `jid-helper.js` | JID normalization, decode, phone formatting |
 | `loader.js` | Plugin scanner with bug fixes |
 | `logs.js` | Colored logging with levels |
@@ -45,13 +45,13 @@ All files under `lib/` were rewritten from obfuscated (eval + string array + con
 ### Database (`lib/database/`)
 | File | Description |
 |------|-------------|
-| `index.js` | Database factory |
-| `save-to-local.js` | JSON file database |
-| `save-to-sqlite.js` | SQLite database |
-| `save-to-mysql.js` | MySQL database |
-| `save-to-postgresql.js` | PostgreSQL database |
-| `save-to-mongo.js` | MongoDB database |
-| `save-to-redis.js` | Redis database |
+| `index.js` | Static `saveToXxx` exports (plain object pattern) |
+| `save-to-local.js` | JSON file — returns `{ users, groups, chats, setting }` |
+| `save-to-sqlite.js` | SQLite — returns plain object with `__persist` |
+| `save-to-mysql.js` | MySQL — returns plain object with `__persist` |
+| `save-to-postgresql.js` | PostgreSQL — returns plain object with `__persist` |
+| `save-to-mongo.js` | MongoDB — returns plain object with `__persist` |
+| `save-to-redis.js` | Redis — returns plain object with `__persist` |
 
 ### Listener (`lib/listener/`)
 | File | Description |
@@ -105,7 +105,7 @@ All files under `lib/` were rewritten from obfuscated (eval + string array + con
 
 ---
 
-## Bug Fixes
+## Bug Fixes (Round 1)
 
 ### 1. Plugin Scanner (`lib/utils/loader.js`)
 - **`concat` error**: Scan only `.js` files (filter with `file.endsWith('.js')`)
@@ -122,9 +122,45 @@ All files under `lib/` were rewritten from obfuscated (eval + string array + con
 - **Override `sock.sendMessage`**: Uses `relayMessage` for protocol message types (listMessage, productMessage, interactiveMessage, interactiveResponseMessage) that `generateWAMessageContent` doesn't support
 - **Fallback to original**: For standard message types, delegates to the original Baileys `sendMessage`
 
-### 4. Database connections
-- **Connection cleanup**: `save-to-mysql.js`, `save-to-postgresql.js`, `save-to-mongo.js`, `save-to-redis.js` all release resources after use
-- **Error handling**: All database modules wrap JSON.parse in try/catch
+---
+
+## Bug Fixes (Round 2)
+
+### 4. Database API — Static `saveToXxx` returning plain object (`lib/database/`)
+- **Before**: Class-based `useDatabase(type)` factory returning `new XxxDatabase()`
+- **After**: Static functions `Database.saveToLocal(dir)`, `Database.saveToMongo(url)`, etc.
+- **Return type**: Plain JS object `{ users: [], groups: [], chats: [], setting: {} }` with `__persist()` method
+- **Same reference**: Returning the same `data` object so mutations (`global.db.users.push(...)`) persist
+
+### 5. Message methods — Copied to `client.sock` + new methods (`lib/core/message.js`)
+- **Method copy**: All 29 methods now copied to `client.sock` via `for (const name of methodNames) sock[name] = client[name]`
+- **`getRealJid(sender)`**: Resolves LID to JID via group metadata or `sock.onWhatsApp`
+- **`getUserId(jid)`**: Wraps `sock.onWhatsApp(jid)` returns `{ lid, jid }`
+
+### 6. Utils — 11 missing methods (`lib/utils/functions.js`)
+| Method | Description |
+|--------|-------------|
+| `Styles(text)` | Returns formatted/styled text |
+| `texted(type, text)` | Wraps text: `bold` → `*text*`, `monospace` → `` `text` ``, `italic` → `_text_` |
+| `printError(error)` | Pretty-prints error stack with timestamp |
+| `delay(ms)` | `new Promise(r => setTimeout(r, ms))` |
+| `fetchAsBuffer(url)` | HTTP GET returning `Buffer` via axios |
+| `generateLink(text)` | Extracts all URLs from string, returns array |
+| `hitstat(command, sender)` | Tracks command usage counts in memory |
+| `toTime(ms)` | Converts ms to `"1h 1m 1s"` format |
+| `random(array)` | Returns random element |
+| `jsonFormat(obj)` | `JSON.stringify(obj, null, 2)` |
+| `matcher(input, candidates)` | Levenshtein-based fuzzy matching, returns `{ string, accuracy }[]` sorted desc |
+
+### 7. Event context fixes (`lib/core/connection.js`)
+- **`group.add`/`group.remove`**: Context now includes `{ jid, member: { phoneNumber }, subject, groupMetadata }` with resolved group metadata
+- **`message.delete` event**: Detects `protocolMessage.type === 0` in `messages.update`, emits `{ message: { key, sender, isGroup, chat } }`
+- **`stories` synthetic event**: Filters `status@broadcast` messages in `messages.upsert`, emits story context
+- **`register` alias**: `Client.prototype.register = Client.prototype.on`
+
+### 8. Config fallback (`lib/index.js`)
+- **Before**: Only tried `./config.json`
+- **After**: Tries `./config.json` first, then falls back to `./config.js` via `require()`
 
 ---
 
@@ -133,11 +169,11 @@ All files under `lib/` were rewritten from obfuscated (eval + string array + con
 ```js
 module.exports = {
   Client,    // WhatsApp bot client
-  Database,  // Database factory
+  Database,  // Static saveToXxx functions
   Proxy,     // Key-value proxy factory
   Adapter,   // Auth adapter factory
   Memory,    // In-memory cache
-  Config,    // config.json contents
+  Config,    // config.json / config.js contents
   Cooldown,  // Cooldown class
   Converter, // Media converter
   Instance,  // Sub-bot instance manager
@@ -149,7 +185,7 @@ module.exports = {
   Exif,      // Sticker EXIF
   Node,      // Node package info
   NeoxrApi,  // @neoxr/api (optional)
-  Utils,     // Utility functions
+  Utils,     // Utility functions (includes 11 new methods)
   Version,   // Package version
 }
 ```
@@ -163,11 +199,15 @@ module.exports = {
 3. **EventEmitter pattern**: `Client` extends `EventEmitter` for plugin event compatibility.
 4. **relayMessage override**: Handles protobuf types not supported by Baileys `generateWAMessageContent`.
 5. **Per-file error handling**: Each plugin file is imported independently so failures don't cascade.
+6. **Plain object database**: `saveToXxx` returns a plain mutable object (not class instance) so consumers can do `global.db.users.push(...)` directly.
+7. **Dual method registration**: Message methods are attached to both `client` and `client.sock` for flexibility.
+8. **LID resolution**: `getRealJid` handles the Baileys LID → JID conversion needed for group operations.
 
 ---
 
 ## Checklist
 
+### Round 1
 - [x] All `lib/` files rewritten (no obfuscated code remains)
 - [x] Plugin scanner filters `.js` files only
 - [x] `updatePlugin` handles null/undefined plugins
@@ -179,3 +219,16 @@ module.exports = {
 - [x] All memory stores implemented (cache, local, temporary)
 - [x] All 13 event listeners implemented
 - [x] Public API exports complete
+
+### Round 2
+- [x] `saveToLocal`, `saveToMongo`, etc. return plain object, not class instance
+- [x] `Database` exports static `saveToXxx` functions directly
+- [x] All message methods copied to `client.sock`
+- [x] `getRealJid` resolves LID to JID
+- [x] `getUserId` wraps `onWhatsApp`
+- [x] 11 Utils methods: `Styles`, `texted`, `printError`, `delay`, `fetchAsBuffer`, `generateLink`, `hitstat`, `toTime`, `random`, `jsonFormat`, `matcher`
+- [x] `group.add`/`remove` context includes `{ jid, member, subject, groupMetadata }`
+- [x] `message.delete` event from `messages.update` protocol messages
+- [x] `stories` synthetic event from `status@broadcast` upserts
+- [x] `register` alias (`Client.prototype.register = Client.prototype.on`)
+- [x] Config fallback: `config.json` → `config.js`
